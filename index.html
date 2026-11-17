@@ -695,7 +695,6 @@ async function lobbyCreate(){
   try {
     await leaveLobby(true);
     await fref('lobbies/' + u.id).set({meta: {host: FB.uid, hostNick: u.nick, state: 'waiting', ts: Date.now()}, players: {[FB.uid]: {nick: u.nick}}});
-    fref('lobbies/' + u.id).onDisconnect().remove();
     enterLobby(u.id, true);
   } catch (e) { lobbyErr(e); }
 }
@@ -707,11 +706,10 @@ async function lobbyJoin(){
   if (code === DB.users[cur].id) return lobbyMsg('Это ваш ID: нажмите «Создать лобби»');
   try {
     const v = (await fref('lobbies/' + code).once('value')).val();
-    if (!v || !v.meta) return lobbyMsg('Лобби не найдено');
+    if (!v || !v.meta || Date.now() - (v.meta.ts || 0) > 2 * 3600 * 1000) return lobbyMsg('Лобби не найдено. Введите ID хоста (он виден у него на экране лобби), хост должен оставаться в лобби.');
     if (v.meta.state !== 'waiting') return lobbyMsg('Игра уже идёт');
     if (Object.keys(v.players || {}).length >= 4) return lobbyMsg('Лобби заполнено (максимум 4)');
     await fref('lobbies/' + code + '/players/' + FB.uid).set({nick: DB.users[cur].nick});
-    fref('lobbies/' + code + '/players/' + FB.uid).onDisconnect().remove();
     enterLobby(code, false);
   } catch (e) { lobbyErr(e); }
 }
@@ -719,12 +717,15 @@ function enterLobby(hid, host){
   NET.hid = hid; NET.host = host; NET.pos = {}; NET.vis = {}; NET.world = null; NET.dead = {}; NET.on = false; NET.over = false;
   const ref = fref('lobbies/' + hid), cb = ref.on('value', s => onLobby(s.val()));
   NET.unsub = () => ref.off('value', cb);
+  clearInterval(NET.hb);
+  if (host) NET.hb = setInterval(() => { if (NET.hid && NET.host) fref('lobbies/' + NET.hid + '/meta/ts').set(Date.now()).catch(() => {}); }, 60000);
   refreshLobby();
 }
 async function leaveLobby(silent){
   if (!NET.hid) return;
   const hid = NET.hid, host = NET.host;
   if (NET.unsub) NET.unsub();
+  clearInterval(NET.hb);
   NET.unsub = null; NET.hid = null; NET.on = false; NET.over = false;
   try {
     if (host) await fref('lobbies/' + hid).remove();
@@ -743,6 +744,8 @@ function onLobby(v){
     return;
   }
   NET.meta = v.meta; NET.players = v.players || {}; NET.pos = v.pos || {};
+  if (!NET.host && v.meta.state === 'waiting' && !NET.players[FB.uid] && cur)
+    fref('lobbies/' + NET.hid + '/players/' + FB.uid).set({nick: DB.users[cur].nick}).catch(() => {});
   if (!NET.host) { NET.world = v.world || null; NET.dead = (v.world && v.world.dead) || {}; }
   if (v.meta.state === 'playing' && !NET.on) startNet();
   if (v.meta.state === 'waiting') { NET.on = false; NET.over = false; }
